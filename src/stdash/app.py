@@ -1,75 +1,135 @@
-import streamlit as st
-import pandas as pd
+import streamlit  as st
 import matplotlib.pyplot as plt
+import pandas as pd
 import requests
-import datetime as dt
+import altair as alt
 import numpy as np
+import os
 
-st.title("CNN JOB MON")
+# st.subheader('요청 / 처리 건수(h)')
+
+# 탭 생성 : 첫번째 탭의 이름은 Tab A 로, Tab B로 표시합니다. 
+tab1, tab2, tab3, tab4 = st.tabs([
+                                '시간 당 요청 수' ,
+                                '시간 당 요청 및 처리 건수',
+                                '요청 및 처리의 차이',
+                                'USER별 불균형 확인'
+                                ])
 
 def load_data():
-    url = 'http://43.202.66.118:8077/all'
+    DB = os.getenv('DB')
+    DB_PORT =os.getenv('DB_PORT')
+    url = f'http://{DB}:{DB_PORT}/all'
     r = requests.get(url)
     d = r.json()
-
     return d
-    
+
 data = load_data()
 df = pd.DataFrame(data)
-df
 
-# request_time을 datetime으로 변환
+# 요청 시간 Groupby
 df['request_time'] = pd.to_datetime(df['request_time'])
+df['req_time'] = df['request_time'].dt.strftime('%Y-%m-%d %H')
+df_req = df.groupby('req_time').count()
 
-# request_time을 시간 단위로 그룹화하고 요청 수 계산
-df['request_hour'] = df['request_time'].dt.strftime('%Y-%m-%d %H')  # 시간 단위로 포맷
-df_grouped = df.groupby('request_hour').size().reset_index(name='Number of Requests')
-
-# x축을 시간으로, y축을 요청 수로 하는 그래프 그리기
-x = df_grouped['request_hour']
-y = df_grouped['Number of Requests']
-
-plt.figure(figsize=(10, 6))
-plt.bar(x, y)
-plt.plot(x,y, 'r')
-plt.xticks(rotation=45)  # x축 레이블이 겹치지 않도록 90도 회전
-plt.xlabel('Date and Time')
-plt.ylabel('Number of Requests')
-plt.title('Requests by Date and Time')
-
-plt.tight_layout()  # 레이아웃 조정
-plt.show()
-
-st.pyplot(plt)
+# 처리 시간 Groupby
+df['prediction_time'] = pd.to_datetime(df['prediction_time'])
+df['pre_time'] = df['prediction_time'].dt.strftime('%Y-%m-%d %H')
+df_pre = df.groupby('pre_time').count()
 
 
-df['request_user']=df['request_user'].astype(str)
-requestu=df.groupby('request_user').size()
+with tab1:
+    plt.figure(figsize=(10, 6))
+    bars1 = plt.bar(df_req.index, df_req['num'], color='steelblue')
+    plt.title("Requests by DateTime")
+    plt.xlabel('DateTime')
+    plt.ylabel('Count Requests')
+    plt.xticks(rotation = 45)
+    for bar in bars1:
+        yval = bar.get_height()  # 막대의 높이 가져오기
+        plt.text(bar.get_x() + bar.get_width()/2, yval, int(yval), ha='center', va='bottom')
+    # 화면에 그리기
+    st.pyplot(plt)
 
-# df_groupuser['request_count'] = df.groupby('request_user').size['num']
-# #df_groupuser['key'] = df_grouped.index
-# #df_groupuser['key']
-# df_groupuser['request_count']
+with tab2:
+    plt.figure(figsize=(10, 6))
+    plt.bar(df_req.index, df_req['num'], color='orange', label='num of requests')
+    plt.plot(df_pre.index,df_pre['num'], color='steelblue', marker='o', label='num of predictions')
+    plt.legend(title="NUM")
+    plt.title("Requests / Prediction by DateTime")
+    plt.xlabel('DateTime')
+    plt.ylabel('Count Requests')
+    plt.xticks(rotation = 45)
+    # 화면에 그리기
+    st.pyplot(plt)
 
-df['prediction_model']=df['prediction_model'].astype(str)
-predictionm=df.groupby('prediction_model').size()
+with tab3:
+    
+    # 요청 시간과 처리 시간을 합쳐서 계산할 데이터프레임 생성
+    all_times = sorted(list(set(df_req.index).union(df_pre.index)))  # 모든 시간대를 포함하는 정렬된 리스트 생성
+    df_dif = pd.DataFrame(index=all_times)  # 정렬된 시간 리스트를 인덱스로 사용
+    df_dif['num_of_requests'] = df_req['num']
+    df_dif['num_of_predictions'] = df_pre['num']
 
-# #size()
-# df_prediction = df.groupby('prediction_model').size()
-# df_prediction
+    # NaN 값을 0으로 대체 (데이터가 없는 시간은 0으로 처리)
+    df_dif.fillna(0, inplace=True)
 
-plt.figure(figsize=(16, 8))
-plt.bar(requestu.index, requestu.values, width=0.4, label='request', color='blue', align='center')
-plt.bar(predictionm.index, predictionm.values, width=0.4, label='predicton', color='red', align="edge")
+    # 요청과 처리 차이 계산
+    df_dif['difference'] = df_dif['num_of_requests'] - df_dif['num_of_predictions']
 
-plt.title('Request user(BLUE) and Prediction(RED) Counts over Time')
-plt.xlabel('time')
-plt.ylabel('count')
+    # 누락된 주체 확인
+    # 요청수가 더 많으면 red, 처리수가 더 많으면 bule
+    colors = ['orange' if x > 0 else 'steelblue' for x in df_dif['difference']]
 
-# plt.figure(figsize=(16,8))
-# #.index .values
-# plt.bar(df_groupuser.index, df_groupuser.values)
-# plt.bar(df_prediction.index, df_prediction.values)
+    conditions = [
+        df_dif['difference'] > 0,  # 과다 요청
+        df_dif['difference'] < 0   # 처리 누락
+    ]
+    choices = ['과다 요청', '처리 누락']
+    
+    # 불균형 정보 데이터프레임 출력
+    st.write(df_dif[['num_of_requests', 'num_of_predictions', 'difference', 'missing_info']])
+    
+    df_dif['missing_info'] = np.select(conditions, choices, '정상 처리')
+    plt.figure(figsize=(10, 6))
+    plt.bar(df_dif.index, df_dif['difference'], color=colors)
+    plt.axhline(0, color='black', linewidth=1, linestyle='-')  # 검은색 점선
+    plt.title("Count of Difference")
+    plt.xlabel('DateTime')
+    plt.ylabel('Count')
+    plt.xticks(rotation = 45)
+    
+    st.pyplot(plt)
 
-st.pyplot(plt)
 
+with tab4:
+    
+    # prediction_model이 n으로 시작하는 것들만 추출
+    plt.figure(figsize=(10, 6)) # 여기에서 새로운 그림 생성
+    df['prediction_model'] = df['prediction_model'].astype(dtype='str')
+
+    def func(x):
+        if x[0] == 'n':
+            return x
+    df2 = df['prediction_model'].map(func).to_frame()
+
+    # prediction 유저 수
+    pre_usr = df2.value_counts()
+    # request 유저 수
+    req_usr = df[['request_user']].value_counts()
+
+    df_usr = pd.concat([req_usr, pre_usr], axis = 1)
+    df_usr.columns = ['req_count', 'pre_count']
+    df_usr = df_usr.reset_index()
+    df_usr = df_usr.set_index('level_0')
+    df_usr = df_usr.fillna(0)    
+    
+    w = 0.25
+    ind = np.arange(len(df_usr))
+    plt.bar(ind - w, df_usr['req_count'], width = w+0.1, label = 'request count', color = 'orange')
+    plt.bar(ind + w, df_usr['pre_count'], width = w+0.1, label = 'predict count', color = 'steelblue')
+    plt.xticks(ind, labels = df_usr.index)
+    plt.xlabel('User')
+    plt.ylabel('Count')
+    plt.legend()
+    st.pyplot(plt)
